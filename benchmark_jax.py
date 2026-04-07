@@ -84,6 +84,10 @@ def benchmark(params, input_dim, batch_size, n_runs):
     grad_forward = jax.jit(grad(lambda p, x: jnp.sum(forward(p, x)), argnums=1))
 
     x_grad = random.normal(rng, (batch_size, input_dim))
+
+    # Warmup
+    _ = grad_forward(params, x_grad).block_until_ready()
+
     start = time.perf_counter()
     for _ in range(n_runs):
         _ = grad_forward(params, x_grad).block_until_ready()
