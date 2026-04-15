@@ -6,8 +6,8 @@ import numpy as np
 # -----------------------------
 
 frameworks = ["PyTorch", "PyTorch (batched)", "JAX", "JAX (batched)", "SOFIE+Clad (1 thread)"]
-forward_times = [85.89, 1.22, 42.12, 1.52, 20.7978]
-grad_times    = [662.16, 11.88, 151.07, 126.15, 72.0978]
+forward_times = [87.71, 98.06, 50.19, 1.94, 20.8977]
+grad_times    = [394.68, 286.83, 34.50, 3.05, 73.2414]
 
 x = np.arange(len(frameworks))
 width = 0.35

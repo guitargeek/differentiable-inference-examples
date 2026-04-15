@@ -1,0 +1,24 @@
+--- PyTorch Benchmark Results ---
+Forward per sample: 87.71 µs
+Grad per sample: 394.68 µs
+Grad / Forward ratio: 4.50
+
+--- PyTorch Benchmark Results (batched) ---
+Forward per sample: 98.06 µs
+Grad per sample: 286.83 µs
+Grad / Forward ratio: 2.92
+
+--- JAX Benchmark Results ---
+Forward per sample: 50.19 µs
+Grad per sample: 34.50 µs
+Grad / Forward ratio: 0.69
+
+--- JAX Benchmark Results (batched) ---
+Forward per sample: 1.94 µs
+Grad per sample: 3.05 µs
+Grad / Forward ratio: 1.57
+
+--- SOFIE + Clad Benchmark ---
+Forward time: 20.8977 us
+Gradient time: 73.2414 us
+Grad / Forward ratio: 3.50476

@@ -44,29 +44,26 @@ class FullyConnectedNet(nn.Module):
 
 
 # -----------------------------
-# Synthetic dataset
-# -----------------------------
-def generate_data(n_samples, input_dim):
-    X = torch.randn(n_samples, input_dim)
-    # Nonlinear target
-    y = (X ** 2).sum(dim=1, keepdim=True) + 0.1 * torch.randn(n_samples, 1)
-    return X, y
-
-
-# -----------------------------
 # Benchmarking
 # -----------------------------
 def benchmark(model, input_dim, batch_size, n_runs):
     model.eval()
 
-    x = torch.randn(batch_size, input_dim)
-    x_grad = torch.randn(batch_size, input_dim, requires_grad=True)
+    x = torch.ones(batch_size, input_dim)
+    x_grad = torch.ones(batch_size, input_dim, requires_grad=True)
 
     n_samples = batch_size * n_runs
 
     # Warmup
     for _ in range(10):
-        _ = model(x)
+        y = model(x_grad)
+        y.backward(torch.ones_like(y))
+
+    # If you want to validate
+    # print("Gradient check:")
+    # for i, val in enumerate(x_grad.grad[0]):
+    #     print(i, val.detach().numpy())
+    # x_grad.grad.zero_()
 
     # Forward (no grad)
     start = time.perf_counter()
@@ -74,7 +71,7 @@ def benchmark(model, input_dim, batch_size, n_runs):
         for _ in range(n_runs):
             _ = model(x)
     end = time.perf_counter()
-    inference_time = (end-start)/n_samples
+    inference_time = (end - start) / n_samples
     print(f"Forward per sample: {inference_time*1e6:.2f} µs")
 
     # Gradient
@@ -84,7 +81,7 @@ def benchmark(model, input_dim, batch_size, n_runs):
         y.backward(torch.ones_like(y))
         x_grad.grad.zero_()
     end = time.perf_counter()
-    grad_time = (end-start)/n_samples
+    grad_time = (end - start) / n_samples
     print(f"Grad per sample: {grad_time*1e6:.2f} µs")
 
     print(f"Grad / Forward ratio: {grad_time / inference_time:.2f}")
@@ -95,7 +92,7 @@ def benchmark(model, input_dim, batch_size, n_runs):
 # -----------------------------
 def export_onnx(model, input_dim, filename="model.onnx"):
     model.eval()
-    dummy_input = torch.randn(1, input_dim).to(DEVICE)
+    dummy_input = torch.ones(1, input_dim).to(DEVICE)
 
     torch.onnx.export(
         model,
@@ -103,11 +100,12 @@ def export_onnx(model, input_dim, filename="model.onnx"):
         filename,
         input_names=["input"],
         output_names=["output"],
-        opset_version=18,  # 🔥 IMPORTANT: match PyTorch default
+        opset_version=18,  # match PyTorch default
         external_data=False,
     )
 
     print(f"\nModel exported to {filename}")
+
 
 # -----------------------------
 # Main
@@ -116,9 +114,6 @@ def main():
     torch.manual_seed(0)
 
     model = FullyConnectedNet(INPUT_DIM, HIDDEN_DIM, HIDDEN_LAYERS).to(DEVICE)
-
-    X, y = generate_data(N_SAMPLES, INPUT_DIM)
-    X, y = X.to(DEVICE), y.to(DEVICE)
 
     print("\n--- PyTorch Benchmark Results ---")
     benchmark(model, INPUT_DIM, 1, 1000)
@@ -129,35 +124,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-"""
-# -----------------------------
-# Training
-# -----------------------------
-def train(model, X, y):
-    model.train()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn = nn.MSELoss()
-
-    dataset = torch.utils.data.TensorDataset(X, y)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-    for epoch in range(EPOCHS):
-        total_loss = 0.0
-        for xb, yb in loader:
-            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-
-            optimizer.zero_grad()
-            preds = model(xb)
-            loss = loss_fn(preds, yb)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-        print(f"Epoch {epoch+1}: loss = {total_loss:.4f}")
-
-
-# train(model, X, y)
-"""
