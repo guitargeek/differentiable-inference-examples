@@ -285,17 +285,69 @@ def build_model(meta, n_channels, n_bins, obs_scale, seed):
 # ---------------------------------------------------------------------------
 # Benchmarking
 # ---------------------------------------------------------------------------
-def reset_params(mu, nuisances, alphas_per_chan):
-    mu.setVal(1.0)
-    for nu in nuisances:
-        nu.setVal(0.0)
+def default_start(mu, nuisances, alphas_per_chan):
+    """Deterministic start near the truth: mu=1, nu=0, alpha=0. Cheap to fit
+    from -- handy as a smoke check but unrealistic timing-wise."""
+    start = {"mu": 1.0, "nu": [0.0] * len(nuisances)}
+    start["alpha"] = [[0.0] * len(ac) for ac in alphas_per_chan]
+    return start
+
+
+def random_start(rng, mu, nuisances, alphas_per_chan):
+    """Per-call random start drawn from N(0,1) for each nuisance, and from
+    Uniform(mu_min, mu_max) for the POI. The same start is reused across the
+    CPU and Codegen backends so wall times stay comparable run-by-run."""
+    mu_min, mu_max = mu.getMin(), mu.getMax()
+    return {
+        "mu": float(rng.uniform(mu_min, mu_max)),
+        "nu": rng.standard_normal(len(nuisances)).tolist(),
+        "alpha": [
+            rng.standard_normal(len(ac)).tolist() for ac in alphas_per_chan
+        ],
+    }
+
+
+def shifted_start(mu, nuisances, alphas_per_chan, kick=1.0):
+    """Deterministic kick of `kick` pre-fit sigmas from the prior mode (mu=1,
+    nu=0, alpha=0). The sign alternates by global parameter index so kicks
+    aren't all in the same direction. Identical across scan points and across
+    the two backends, so repeats only measure timing noise (not start-point
+    variation) and trends across a scan stay clean."""
+    def sign(i):
+        return 1.0 if i % 2 == 0 else -1.0
+
+    idx = 0
+    mu_val = 1.0 + sign(idx) * kick
+    mu_val = min(max(mu_val, mu.getMin()), mu.getMax())
+    idx += 1
+
+    nu_vals = []
+    for _ in nuisances:
+        nu_vals.append(sign(idx) * kick)
+        idx += 1
+
+    alpha_vals = []
     for alphas_c in alphas_per_chan:
-        for a in alphas_c:
-            a.setVal(0.0)
+        row = []
+        for _ in alphas_c:
+            row.append(sign(idx) * kick)
+            idx += 1
+        alpha_vals.append(row)
+
+    return {"mu": mu_val, "nu": nu_vals, "alpha": alpha_vals}
 
 
-def time_minimize(nll, mu, nuisances, alphas_per_chan):
-    reset_params(mu, nuisances, alphas_per_chan)
+def apply_start(start, mu, nuisances, alphas_per_chan):
+    mu.setVal(start["mu"])
+    for nu, val in zip(nuisances, start["nu"]):
+        nu.setVal(float(val))
+    for alphas_c, vals in zip(alphas_per_chan, start["alpha"]):
+        for a, val in zip(alphas_c, vals):
+            a.setVal(float(val))
+
+
+def time_minimize(nll, mu, nuisances, alphas_per_chan, start):
+    apply_start(start, mu, nuisances, alphas_per_chan)
     minim = ROOT.RooMinimizer(nll)
     minim.setErrorLevel(0.5)
     minim.setPrintLevel(-1)
@@ -308,14 +360,21 @@ def time_minimize(nll, mu, nuisances, alphas_per_chan):
     return dt, status, result
 
 
-def bench(label, nll, mu, nuisances, alphas_per_chan, n_repeats):
+def bench(label, nll, mu, nuisances, alphas_per_chan, starts):
+    """`starts` is a list of starting points: starts[0] is the warm-up,
+    starts[1:] are the timed runs. The same list is passed to both backends
+    so each run's start is identical across CPU and Codegen."""
     print(f"\n=== {label} ===")
-    dt0, status0, _ = time_minimize(nll, mu, nuisances, alphas_per_chan)
+    dt0, status0, _ = time_minimize(
+        nll, mu, nuisances, alphas_per_chan, starts[0]
+    )
     print(f"  warm-up : status={status0}  wall = {dt0:.3f} s")
     times = []
     last_result = None
-    for i in range(n_repeats):
-        dt, status, res = time_minimize(nll, mu, nuisances, alphas_per_chan)
+    for i, start in enumerate(starts[1:]):
+        dt, status, res = time_minimize(
+            nll, mu, nuisances, alphas_per_chan, start
+        )
         times.append(dt)
         last_result = res
         print(f"  run {i + 1:2d}  : status={status}  wall = {dt:.3f} s")
@@ -348,7 +407,26 @@ def main():
     parser.add_argument("--repeats", type=int, default=3,
                         help="Timed minimize() calls per backend (after warm-up)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--random-start", action="store_true",
+                        help="Randomize the starting point per run (mu ~ "
+                             "Uniform(mu_min, mu_max), nuisances ~ N(0,1)). "
+                             "The same start is reused across the CPU and "
+                             "Codegen backends so timings stay comparable. "
+                             "Default: deterministic start at the truth, which "
+                             "makes Minuit converge in a handful of iterations "
+                             "and underestimates per-call wall time.")
+    parser.add_argument("--shifted-start", type=float, nargs="?",
+                        const=1.0, default=None, metavar="KICK",
+                        help="Deterministic kick of KICK pre-fit sigmas from "
+                             "the prior mode (mu=1, nu=0, alpha=0), with the "
+                             "sign alternating by parameter index. Identical "
+                             "across runs, scan points, and backends -- gives "
+                             "Minuit something to do without obscuring trends "
+                             "with run-to-run randomness. Default kick if the "
+                             "flag is given without a value: 1.0.")
     args = parser.parse_args()
+    if args.random_start and args.shifted_start is not None:
+        raise SystemExit("--random-start and --shifted-start are mutually exclusive.")
 
     meta = load_meta()
     K_meta = int(meta["n_shared"]); M_meta = int(meta["n_per_channel"])
@@ -404,13 +482,38 @@ def main():
     ROOT.SetOwnership(nll_default, True)
     ROOT.SetOwnership(nll_codegen, True)
 
+    # Pre-generate one start per (warm-up + run) so both backends fit from
+    # exactly the same sequence of starting points and timings stay
+    # comparable run-by-run.
+    n_starts = 1 + args.repeats
+    if args.random_start:
+        start_rng = np.random.default_rng(args.seed + 1)
+        starts = [
+            random_start(start_rng, mu, nuisances, alphas_per_chan)
+            for _ in range(n_starts)
+        ]
+        print(f"Starting point       : random per-run (rng seed={args.seed + 1})")
+    elif args.shifted_start is not None:
+        single = shifted_start(mu, nuisances, alphas_per_chan, args.shifted_start)
+        starts = [single] * n_starts
+        print(
+            f"Starting point       : deterministic shift of "
+            f"+/-{args.shifted_start:g} sigma from prior mode "
+            f"(alternating signs)"
+        )
+    else:
+        starts = [
+            default_start(mu, nuisances, alphas_per_chan) for _ in range(n_starts)
+        ]
+        print("Starting point       : deterministic (mu=1, nu=0, alpha=0)")
+
     mean_default, _, res_default = bench(
         "CPU backend (numerical gradients)",
-        nll_default, mu, nuisances, alphas_per_chan, args.repeats,
+        nll_default, mu, nuisances, alphas_per_chan, starts,
     )
     mean_codegen, _, res_codegen = bench(
         "Codegen + AD backend (analytical gradient via Clad)",
-        nll_codegen, mu, nuisances, alphas_per_chan, args.repeats,
+        nll_codegen, mu, nuisances, alphas_per_chan, starts,
     )
 
     print("\n=== Summary ===")

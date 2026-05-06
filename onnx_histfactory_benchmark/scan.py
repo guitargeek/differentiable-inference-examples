@@ -119,10 +119,17 @@ def run_train(K, M, hidden):
     subprocess.run(cmd, check=True)
 
 
-def run_bench(channels, n_bins, n_obs_scale, repeats, seed):
+def run_bench(channels, n_bins, n_obs_scale, repeats, seed,
+              random_start, shifted_start):
+    start_label = (
+        "random" if random_start
+        else f"shifted={shifted_start}" if shifted_start is not None
+        else "default"
+    )
     print(
         f"\n>>> Benchmark (channels={channels}, n_bins={n_bins}, "
-        f"scale={n_obs_scale}, repeats={repeats}, seed={seed}) ...",
+        f"scale={n_obs_scale}, repeats={repeats}, seed={seed}, "
+        f"start={start_label}) ...",
         flush=True,
     )
     cmd = [
@@ -133,6 +140,10 @@ def run_bench(channels, n_bins, n_obs_scale, repeats, seed):
         "--repeats", str(repeats),
         "--seed", str(seed),
     ]
+    if random_start:
+        cmd.append("--random-start")
+    elif shifted_start is not None:
+        cmd += ["--shifted-start", str(shifted_start)]
     res = subprocess.run(cmd, check=True, capture_output=True, text=True)
     print(res.stdout)
     if res.stderr:
@@ -258,7 +269,7 @@ def make_plot(summary, out_path, xscale="linear"):
     title_top.SetTextSize(0.05)
     title_top.DrawLatex(
         0.54, 0.93,
-        f"HistFactory ONNX benchmark - scan over {SCAN_LABEL[scan_var]}",
+        f"Binned fit ONNX benchmark - scan over {SCAN_LABEL[scan_var]}",
     )
     title_top.SetTextSize(0.035)
     title_top.DrawLatex(0.54, 0.86, fixed_str)
@@ -326,7 +337,24 @@ def main():
                         help="For --scan-var shared_frac: the conserved total "
                              "T = K + N*M of nuisance parameters across the scan. "
                              "Required for shared_frac, ignored otherwise.")
+    parser.add_argument("--random-start", action="store_true",
+                        help="Forward --random-start to benchmark.py: each run "
+                             "starts from a different randomized point in "
+                             "parameter space (shared between CPU and Codegen). "
+                             "Default starts at the truth, which makes Minuit "
+                             "converge in a handful of steps and underestimates "
+                             "wall time.")
+    parser.add_argument("--shifted-start", type=float, nargs="?",
+                        const=1.0, default=None, metavar="KICK",
+                        help="Forward --shifted-start to benchmark.py: a "
+                             "deterministic kick of KICK pre-fit sigmas from "
+                             "the prior mode (alternating signs by parameter "
+                             "index). Identical at every scan point, so trends "
+                             "across the scan stay clean. Mutually exclusive "
+                             "with --random-start. Default kick: 1.0.")
     args = parser.parse_args()
+    if args.random_start and args.shifted_start is not None:
+        raise SystemExit("--random-start and --shifted-start are mutually exclusive.")
 
     typed = int if args.scan_var != "n_obs_scale" else float
     values = [typed(v.strip()) for v in args.values.split(",")]
@@ -344,6 +372,8 @@ def main():
         "repeats": args.repeats,
         "seed": args.seed,
         "hidden": args.hidden,
+        "random_start": args.random_start,
+        "shifted_start": args.shifted_start,
     }
 
     # For the shared-fraction scan, validate inputs and pre-resolve (K, M)
@@ -388,6 +418,7 @@ def main():
         timings = run_bench(
             cfg["channels"], cfg["n_bins"], cfg["n_obs_scale"],
             cfg["repeats"], cfg["seed"],
+            args.random_start, args.shifted_start,
         )
         point = {"value": v, "config": cfg, **timings}
         if args.scan_var == "shared_frac":
