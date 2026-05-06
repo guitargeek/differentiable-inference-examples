@@ -10,15 +10,14 @@ Each benchmark writes a JSON file with the following shape:
     }
 
 This script concatenates the entries (in input-file order) and produces a
-side-by-side bar chart. By default it reads the three result files produced
-by ``run_all.sh`` in the current directory.
+side-by-side bar chart using ROOT. By default it reads the three result
+files produced by ``run_all.sh`` in the current directory.
 """
 
 import argparse
 import json
 
-import matplotlib.pyplot as plt
-import numpy as np
+import ROOT
 
 
 DEFAULT_INPUTS = [
@@ -58,38 +57,69 @@ def main():
 
     entries = load_entries(args.inputs)
     labels = [e["label"] for e in entries]
-    forward_times = [e["forward_us"] for e in entries]
-    grad_times = [e["grad_us"] for e in entries]
+    forward_times = [float(e["forward_us"]) for e in entries]
+    grad_times = [float(e["grad_us"]) for e in entries]
+    n = len(labels)
 
-    x = np.arange(len(labels))
-    width = 0.35
+    ROOT.gROOT.SetBatch(True)
+    ROOT.gStyle.SetOptStat(0)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    rects1 = ax.bar(x - width / 2, forward_times, width, label="Forward", color="#4C72B0")
-    rects2 = ax.bar(x + width / 2, grad_times, width, label="Gradient", color="#55A868")
+    canvas = ROOT.TCanvas("c_bench", "benchmark", 1000, 600)
+    canvas.SetLeftMargin(0.10)
+    canvas.SetRightMargin(0.04)
+    canvas.SetBottomMargin(0.22)
+    canvas.SetTopMargin(0.10)
+    canvas.SetGridy()
 
-    ax.set_ylabel("Time per sample [µs]")
-    ax.set_title(args.title)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=30, ha="right")
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.7)
+    h_forward = ROOT.TH1F("h_forward", args.title, n, 0, n)
+    h_grad = ROOT.TH1F("h_grad", "", n, 0, n)
+    for i, lab in enumerate(labels, start=1):
+        h_forward.GetXaxis().SetBinLabel(i, lab)
+        h_grad.GetXaxis().SetBinLabel(i, lab)
+        h_forward.SetBinContent(i, forward_times[i - 1])
+        h_grad.SetBinContent(i, grad_times[i - 1])
 
-    for rects in [rects1, rects2]:
-        for rect in rects:
-            height = rect.get_height()
-            ax.annotate(
-                f"{height:.1f}",
-                xy=(rect.get_x() + rect.get_width() / 2, height),
-                xytext=(0, 3),
-                textcoords="offset points",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
+    h_forward.SetFillColor(ROOT.TColor.GetColor("#4C72B0"))
+    h_forward.SetLineColor(ROOT.kBlack)
+    h_grad.SetFillColor(ROOT.TColor.GetColor("#55A868"))
+    h_grad.SetLineColor(ROOT.kBlack)
 
-    plt.tight_layout()
-    plt.savefig(args.out)
+    bar_w = 0.4
+    h_forward.SetBarOffset(0.05)
+    h_forward.SetBarWidth(bar_w)
+    h_grad.SetBarOffset(0.05 + bar_w + 0.05)
+    h_grad.SetBarWidth(bar_w)
+
+    ymax = max(max(forward_times), max(grad_times))
+    h_forward.SetMaximum(ymax * 1.18)
+    h_forward.SetMinimum(0)
+
+    h_forward.GetYaxis().SetTitle("Time per sample [#mus]")
+    h_forward.GetYaxis().SetTitleOffset(1.1)
+    h_forward.GetXaxis().SetLabelSize(0.035)
+    h_forward.GetXaxis().LabelsOption("v")
+
+    h_forward.Draw("BAR")
+    h_grad.Draw("BAR SAME")
+
+    leg = ROOT.TLegend(0.78, 0.80, 0.95, 0.89)
+    leg.SetBorderSize(0)
+    leg.SetFillStyle(0)
+    leg.AddEntry(h_forward, "Forward", "f")
+    leg.AddEntry(h_grad, "Gradient", "f")
+    leg.Draw()
+
+    latex = ROOT.TLatex()
+    latex.SetTextSize(0.022)
+    latex.SetTextAlign(21)
+    pad = 0.012 * ymax
+    for i in range(n):
+        x_left = i + 0.05 + bar_w / 2
+        x_right = i + 0.05 + bar_w + 0.05 + bar_w / 2
+        latex.DrawLatex(x_left, forward_times[i] + pad, f"{forward_times[i]:.1f}")
+        latex.DrawLatex(x_right, grad_times[i] + pad, f"{grad_times[i]:.1f}")
+
+    canvas.SaveAs(args.out)
     print(f"Plot written to {args.out}")
 
 

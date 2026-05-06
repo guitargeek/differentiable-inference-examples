@@ -89,7 +89,7 @@ onnx_histfactory_benchmark/
 ├── README.md
 ├── train_and_export.py    # PyTorch: regress log-morph, export ONNX
 ├── benchmark.py            # RooFit: simultaneous binned fit, time both backends
-└── scan.py                 # Drives parameter scans + matplotlib plots
+└── scan.py                 # Drives parameter scans + ROOT plots
 ```
 
 `train_and_export.py` writes:
@@ -121,7 +121,7 @@ python benchmark.py [--channels N] [--n-bins B] [--n-obs-scale 1.0] [--repeats 3
 
 ## Scans + plots
 
-`scan.py` drives parameter sweeps and produces a 2-panel matplotlib plot
+`scan.py` drives parameter sweeps and produces a 2-panel ROOT plot
 (top: wall time per `minimize()` for both backends, log scale, with std error
 bars; bottom: CPU/Codegen speed-up). Output goes to `scan_<tag>.json` and
 `scan_<tag>.png` next to the script.

@@ -9,7 +9,7 @@
 #   5. Plot all three JSON files into plot.png
 #
 # Requires:
-#   - python3 with torch, jax, matplotlib, numpy
+#   - python3 with torch, jax, numpy
 #   - ROOT (with tmva-sofie=ON and roofit_clad=ON), sourced via thisroot.sh
 
 set -euo pipefail

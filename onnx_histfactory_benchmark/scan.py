@@ -10,7 +10,7 @@ scan point:
   * Run `benchmark.py` with the current parameters.
   * Parse the per-backend "mean : T s   (std S, min M)" lines.
 
-Results are saved to a JSON file and rendered as a 2-panel matplotlib plot:
+Results are saved to a JSON file and rendered as a 2-panel ROOT plot:
 top panel = wall time per `minimize()` for both backends (log scale, with
 std error bars); bottom panel = speed-up ratio CPU / Codegen.
 
@@ -121,37 +121,91 @@ def run_bench(channels, n_bins, n_obs_scale, repeats, seed):
 
 
 def make_plot(summary, out_path, xscale="linear"):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    import array
+
+    import ROOT
+
+    ROOT.gROOT.SetBatch(True)
+    ROOT.gStyle.SetOptStat(0)
 
     points = summary["points"]
     scan_var = summary["scan_var"]
-    xs = [p["value"] for p in points]
-    cpu_y = [p["cpu_mean"] for p in points]
-    cpu_e = [p["cpu_std"] for p in points]
-    cg_y = [p["codegen_mean"] for p in points]
-    cg_e = [p["codegen_std"] for p in points]
-    speedup = [c / g if g > 0 else float("nan") for c, g in zip(cpu_y, cg_y)]
+    n = len(points)
+    xs_list = [float(p["value"]) for p in points]
+    xs = array.array("d", xs_list)
+    cpu_y = array.array("d", [p["cpu_mean"] for p in points])
+    cpu_e = array.array("d", [p["cpu_std"] for p in points])
+    cg_y = array.array("d", [p["codegen_mean"] for p in points])
+    cg_e = array.array("d", [p["codegen_std"] for p in points])
+    speedup = array.array(
+        "d", [c / g if g > 0 else 0.0 for c, g in zip(cpu_y, cg_y)]
+    )
+    zeros = array.array("d", [0.0] * n)
 
-    fig, (ax_top, ax_bot) = plt.subplots(
-        2, 1, figsize=(7.5, 6.0), sharex=True,
-        gridspec_kw={"height_ratios": [3, 1.2]},
-    )
-    ax_top.errorbar(
-        xs, cpu_y, yerr=cpu_e, marker="o", linestyle="-",
-        label="CPU (numerical gradients)", capsize=3, color="tab:blue",
-    )
-    ax_top.errorbar(
-        xs, cg_y, yerr=cg_e, marker="s", linestyle="-",
-        label="Codegen + AD (Clad)", capsize=3, color="tab:orange",
-    )
-    ax_top.set_ylabel("Wall time per minimize() [s]")
-    ax_top.set_yscale("log")
+    canvas = ROOT.TCanvas("c_scan", "scan", 900, 720)
+    split = 1.2 / (3.0 + 1.2)  # bottom-pad fraction
+    pad_top = ROOT.TPad("pad_top", "", 0, split, 1, 1)
+    pad_bot = ROOT.TPad("pad_bot", "", 0, 0, 1, split)
+    pad_top.SetBottomMargin(0.02)
+    pad_top.SetTopMargin(0.18)
+    pad_top.SetLeftMargin(0.13)
+    pad_top.SetRightMargin(0.04)
+    pad_top.SetLogy()
+    pad_top.SetGrid()
+    pad_bot.SetTopMargin(0.04)
+    pad_bot.SetBottomMargin(0.32)
+    pad_bot.SetLeftMargin(0.13)
+    pad_bot.SetRightMargin(0.04)
+    pad_bot.SetGrid()
     if xscale == "log":
-        ax_top.set_xscale("log")
-    ax_top.legend(loc="best")
-    ax_top.grid(True, which="both", alpha=0.3)
+        pad_top.SetLogx()
+        pad_bot.SetLogx()
+    pad_top.Draw()
+    pad_bot.Draw()
+
+    # X-axis range, padded slightly so markers don't sit on the frame.
+    if xscale == "log":
+        xmin = min(xs_list) / 1.2
+        xmax = max(xs_list) * 1.2
+    else:
+        span = max(xs_list) - min(xs_list)
+        pad = 0.05 * span if span > 0 else max(1.0, 0.1 * abs(max(xs_list)))
+        xmin = min(xs_list) - pad
+        xmax = max(xs_list) + pad
+
+    # ---- Top panel: CPU and Codegen wall times with error bars ----
+    pad_top.cd()
+    g_cpu = ROOT.TGraphErrors(n, xs, cpu_y, zeros, cpu_e)
+    g_cg = ROOT.TGraphErrors(n, xs, cg_y, zeros, cg_e)
+    g_cpu.SetMarkerStyle(20)
+    g_cpu.SetMarkerSize(1.1)
+    g_cpu.SetMarkerColor(ROOT.kAzure + 2)
+    g_cpu.SetLineColor(ROOT.kAzure + 2)
+    g_cpu.SetLineWidth(2)
+    g_cg.SetMarkerStyle(21)
+    g_cg.SetMarkerSize(1.1)
+    g_cg.SetMarkerColor(ROOT.kOrange + 7)
+    g_cg.SetLineColor(ROOT.kOrange + 7)
+    g_cg.SetLineWidth(2)
+
+    mg = ROOT.TMultiGraph()
+    mg.Add(g_cpu, "LP")
+    mg.Add(g_cg, "LP")
+    mg.Draw("A")
+    mg.GetXaxis().SetLimits(xmin, xmax)
+    mg.GetXaxis().SetLabelSize(0)
+    mg.GetXaxis().SetTickLength(0.03)
+    mg.GetYaxis().SetTitle("Wall time per minimize() [s]")
+    mg.GetYaxis().SetTitleOffset(1.2)
+    mg.GetYaxis().SetTitleSize(0.045)
+    mg.GetYaxis().SetLabelSize(0.04)
+
+    leg = ROOT.TLegend(0.16, 0.62, 0.55, 0.78)
+    leg.SetBorderSize(0)
+    leg.SetFillStyle(0)
+    leg.AddEntry(g_cpu, "CPU (numerical gradients)", "lp")
+    leg.AddEntry(g_cg, "Codegen + AD (Clad)", "lp")
+    leg.Draw()
 
     fixed = summary["fixed_params"]
     fixed_str = (
@@ -159,28 +213,55 @@ def make_plot(summary, out_path, xscale="linear"):
         f"K={fixed['n_shared']}, M={fixed['n_per_channel']}, "
         f"yield_scale={fixed['n_obs_scale']}, repeats={fixed['repeats']}"
     )
-    # Replace the scanned variable's value with "<scan>" so the title is honest.
     title_var = {"n_shared": "K", "n_per_channel": "M"}.get(scan_var, scan_var)
     fixed_str = re.sub(
         rf"\b{re.escape(title_var)}=[\w.+-]+",
         f"{title_var}=<scan>",
         fixed_str,
     )
-    ax_top.set_title(
-        f"HistFactory ONNX benchmark — scan over {SCAN_LABEL[scan_var]}\n{fixed_str}",
-        fontsize=9,
+    title_top = ROOT.TLatex()
+    title_top.SetNDC()
+    title_top.SetTextAlign(22)
+    title_top.SetTextSize(0.05)
+    title_top.DrawLatex(
+        0.54, 0.93,
+        f"HistFactory ONNX benchmark - scan over {SCAN_LABEL[scan_var]}",
     )
+    title_top.SetTextSize(0.035)
+    title_top.DrawLatex(0.54, 0.86, fixed_str)
 
-    ax_bot.plot(xs, speedup, marker="d", linestyle="-", color="tab:green")
-    ax_bot.axhline(1.0, color="grey", linestyle="--", alpha=0.5)
-    ax_bot.set_xlabel(SCAN_LABEL[scan_var])
-    ax_bot.set_ylabel("CPU / Codegen")
-    if xscale == "log":
-        ax_bot.set_xscale("log")
-    ax_bot.grid(True, which="both", alpha=0.3)
+    pad_top.RedrawAxis()
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
+    # ---- Bottom panel: speed-up ratio ----
+    pad_bot.cd()
+    g_speed = ROOT.TGraph(n, xs, speedup)
+    g_speed.SetMarkerStyle(33)
+    g_speed.SetMarkerSize(1.6)
+    g_speed.SetMarkerColor(ROOT.kGreen + 2)
+    g_speed.SetLineColor(ROOT.kGreen + 2)
+    g_speed.SetLineWidth(2)
+    g_speed.SetTitle("")
+    g_speed.Draw("ALP")
+    g_speed.GetXaxis().SetLimits(xmin, xmax)
+    g_speed.GetXaxis().SetTitle(SCAN_LABEL[scan_var])
+    g_speed.GetXaxis().SetTitleSize(0.12)
+    g_speed.GetXaxis().SetTitleOffset(1.05)
+    g_speed.GetXaxis().SetLabelSize(0.10)
+    g_speed.GetYaxis().SetTitle("CPU / Codegen")
+    g_speed.GetYaxis().SetTitleSize(0.10)
+    g_speed.GetYaxis().SetTitleOffset(0.55)
+    g_speed.GetYaxis().SetLabelSize(0.09)
+    g_speed.GetYaxis().SetNdivisions(505)
+
+    line = ROOT.TLine(xmin, 1.0, xmax, 1.0)
+    line.SetLineColor(ROOT.kGray + 2)
+    line.SetLineStyle(2)
+    line.Draw()
+    g_speed.Draw("LP SAME")
+
+    pad_bot.RedrawAxis()
+
+    canvas.SaveAs(str(out_path))
     print(f"Saved plot -> {out_path}")
 
 

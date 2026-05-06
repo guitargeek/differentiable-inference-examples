@@ -78,7 +78,7 @@ producing one more JSON file and listing it.
 
 You need:
 
-* Python with `torch`, `jax`, `numpy`, `matplotlib`.
+* Python with `torch`, `jax`, `numpy`. The plotting script uses ROOT (PyROOT).
 * ROOT built with `tmva-sofie=ON` and `roofit_clad=ON`, sourced via
   `thisroot.sh`.
 
