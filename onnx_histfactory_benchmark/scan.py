@@ -5,8 +5,8 @@ that the PyTorch and ROOT/SOFIE ONNX runtimes don't share a Python process
 (same reason `train_and_export.py` and `benchmark.py` are split). For each
 scan point:
 
-  * If the scan variable is `n_shared` or `n_per_channel`, retrain the
-    surrogate (the NN architecture depends on K and M).
+  * If the scan variable is `n_shared`, `n_per_channel`, or `shared_frac`,
+    retrain the surrogate (the NN architecture depends on K and M).
   * Run `benchmark.py` with the current parameters.
   * Parse the per-backend "mean : T s   (std S, min M)" lines.
 
@@ -20,7 +20,7 @@ Examples
 Scan over the number of shared nuisances K (retrains each point):
 
     python scan.py --scan-var n_shared --values 0,2,4,8 \\
-        --channels 4 --n-bins 16 --n-obs-scale 5.0 --repeats 3 \\
+        --channels 8 --n-bins 16 --n-obs-scale 5.0 --repeats 3 \\
         --out-tag K
 
 Scan over channels (no retraining):
@@ -28,6 +28,21 @@ Scan over channels (no retraining):
     python scan.py --scan-var channels --values 1,2,4,8 \\
         --n-bins 16 --n-obs-scale 5.0 --repeats 3 \\
         --out-tag channels
+
+Scan over the *shared fraction* of nuisances at fixed total nuisance count
+T = K + N*M (retrains each point because K and M both change):
+
+    python scan.py --scan-var shared_frac --values 0,4,8,12,16 \\
+        --channels 8 --n-bins 16 --total-nuisances 16 \\
+        --n-obs-scale 5.0 --repeats 3 --out-tag shared_frac
+
+`--values` is the list of K values to visit; M is auto-computed as
+(T - K) / N at each point. Each K must satisfy (T - K) % N == 0. The
+x-axis on the plot is the shared fraction K / T, so f=0 is "all nuisances
+per-channel" and f=1 is "all nuisances shared". This is the regime where
+AD's advantage is clearest: every shared-parameter perturbation invalidates
+the per-bin cache in *all* channels at once, while a per-channel
+perturbation only touches one channel.
 
 The two output files for tag `<tag>` are `scan_<tag>.json` and
 `scan_<tag>.png`, written next to this script.
@@ -66,7 +81,12 @@ SCAN_LABEL = {
     "n_shared": "Shared nuisances K",
     "n_per_channel": "Per-channel nuisances M",
     "n_obs_scale": "Yield scale",
+    "shared_frac": "Shared fraction K / (K + N #upoint M)",
 }
+
+# Scan variables that change the NN architecture and therefore force a
+# retrain of the surrogate at every scan point.
+RETRAIN_VARS = {"n_shared", "n_per_channel", "shared_frac"}
 
 
 def parse_output(stdout):
@@ -131,7 +151,12 @@ def make_plot(summary, out_path, xscale="linear"):
     points = summary["points"]
     scan_var = summary["scan_var"]
     n = len(points)
-    xs_list = [float(p["value"]) for p in points]
+    # For shared_frac the user-supplied "value" is K, but the natural x-axis
+    # is the fraction K / total. Each point caches the fraction it visits.
+    if scan_var == "shared_frac":
+        xs_list = [float(p["shared_frac"]) for p in points]
+    else:
+        xs_list = [float(p["value"]) for p in points]
     xs = array.array("d", xs_list)
     cpu_y = array.array("d", [p["cpu_mean"] for p in points])
     cpu_e = array.array("d", [p["cpu_std"] for p in points])
@@ -208,17 +233,25 @@ def make_plot(summary, out_path, xscale="linear"):
     leg.Draw()
 
     fixed = summary["fixed_params"]
-    fixed_str = (
-        f"channels={fixed['channels']}, n_bins={fixed['n_bins']}, "
-        f"K={fixed['n_shared']}, M={fixed['n_per_channel']}, "
-        f"yield_scale={fixed['n_obs_scale']}, repeats={fixed['repeats']}"
-    )
-    title_var = {"n_shared": "K", "n_per_channel": "M"}.get(scan_var, scan_var)
-    fixed_str = re.sub(
-        rf"\b{re.escape(title_var)}=[\w.+-]+",
-        f"{title_var}=<scan>",
-        fixed_str,
-    )
+    if scan_var == "shared_frac":
+        # K and M both vary; advertise the conserved total instead.
+        fixed_str = (
+            f"channels={fixed['channels']}, n_bins={fixed['n_bins']}, "
+            f"K + N#upointM = {summary['total_nuisances']} (K, M = <scan>), "
+            f"yield_scale={fixed['n_obs_scale']}, repeats={fixed['repeats']}"
+        )
+    else:
+        fixed_str = (
+            f"channels={fixed['channels']}, n_bins={fixed['n_bins']}, "
+            f"K={fixed['n_shared']}, M={fixed['n_per_channel']}, "
+            f"yield_scale={fixed['n_obs_scale']}, repeats={fixed['repeats']}"
+        )
+        title_var = {"n_shared": "K", "n_per_channel": "M"}.get(scan_var, scan_var)
+        fixed_str = re.sub(
+            rf"\b{re.escape(title_var)}=[\w.+-]+",
+            f"{title_var}=<scan>",
+            fixed_str,
+        )
     title_top = ROOT.TLatex()
     title_top.SetNDC()
     title_top.SetTextAlign(22)
@@ -289,13 +322,17 @@ def main():
                              "scan_<tag>.png")
     parser.add_argument("--xscale", default="linear", choices=["linear", "log"],
                         help="X-axis scale on the plot.")
+    parser.add_argument("--total-nuisances", type=int, default=None,
+                        help="For --scan-var shared_frac: the conserved total "
+                             "T = K + N*M of nuisance parameters across the scan. "
+                             "Required for shared_frac, ignored otherwise.")
     args = parser.parse_args()
 
     typed = int if args.scan_var != "n_obs_scale" else float
     values = [typed(v.strip()) for v in args.values.split(",")]
 
     requires_retrain = (
-        args.scan_var in ("n_shared", "n_per_channel") and not args.skip_retrain
+        args.scan_var in RETRAIN_VARS and not args.skip_retrain
     )
 
     fixed_params = {
@@ -309,19 +346,64 @@ def main():
         "hidden": args.hidden,
     }
 
+    # For the shared-fraction scan, validate inputs and pre-resolve (K, M)
+    # per point. Each value v is interpreted as K; M is fixed by the
+    # conservation constraint K + N*M = T.
+    resolved_per_point = {}  # value -> (K, M, fraction)
+    if args.scan_var == "shared_frac":
+        if args.total_nuisances is None:
+            raise SystemExit(
+                "--scan-var shared_frac requires --total-nuisances T."
+            )
+        T = args.total_nuisances
+        N = args.channels
+        for v in values:
+            K = int(v)
+            if K < 0 or K > T:
+                raise SystemExit(
+                    f"shared_frac value K={K} is outside [0, T={T}]."
+                )
+            rem = T - K
+            if rem % N != 0:
+                raise SystemExit(
+                    f"shared_frac value K={K} incompatible with channels={N} "
+                    f"and T={T}: (T - K)={rem} is not divisible by N. "
+                    f"Pick K values congruent to T mod N "
+                    f"(valid Ks: {list(range(T % N, T + 1, N))})."
+                )
+            M = rem // N
+            resolved_per_point[v] = (K, M, K / T if T > 0 else 0.0)
+
     points = []
     for v in values:
         cfg = dict(fixed_params)
-        cfg[args.scan_var] = v
+        if args.scan_var == "shared_frac":
+            K, M, _ = resolved_per_point[v]
+            cfg["n_shared"] = K
+            cfg["n_per_channel"] = M
+        else:
+            cfg[args.scan_var] = v
         if requires_retrain:
             run_train(cfg["n_shared"], cfg["n_per_channel"], args.hidden)
         timings = run_bench(
             cfg["channels"], cfg["n_bins"], cfg["n_obs_scale"],
             cfg["repeats"], cfg["seed"],
         )
-        points.append({"value": v, "config": cfg, **timings})
+        point = {"value": v, "config": cfg, **timings}
+        if args.scan_var == "shared_frac":
+            K, M, frac = resolved_per_point[v]
+            point["shared_frac"] = frac
+            point["K"] = K
+            point["M"] = M
+        points.append(point)
+
+        if args.scan_var == "shared_frac":
+            K, M, frac = resolved_per_point[v]
+            label = f"shared_frac={frac:.3f} (K={K}, M={M})"
+        else:
+            label = f"{args.scan_var}={v}"
         print(
-            f"  -> {args.scan_var}={v}: "
+            f"  -> {label}: "
             f"CPU={timings['cpu_mean']:.3f}+/-{timings['cpu_std']:.3f} s, "
             f"Codegen={timings['codegen_mean']:.3f}+/-{timings['codegen_std']:.3f} s, "
             f"speedup={timings['cpu_mean']/timings['codegen_mean']:.2f}x"
@@ -333,6 +415,8 @@ def main():
         "fixed_params": fixed_params,
         "points": points,
     }
+    if args.scan_var == "shared_frac":
+        summary["total_nuisances"] = args.total_nuisances
     out_json = HERE / f"scan_{args.out_tag}.json"
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)

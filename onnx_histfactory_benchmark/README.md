@@ -136,7 +136,7 @@ point, since the NN architecture depends on K):
 ```bash
 . <root_build>/bin/thisroot.sh
 python scan.py --scan-var n_shared --values 0,2,4,8 \
-    --channels 4 --n-bins 16 --n-per-channel 1 --n-obs-scale 5.0 \
+    --channels 8 --n-bins 16 --n-per-channel 1 --n-obs-scale 5.0 \
     --repeats 3 --out-tag K
 ```
 
@@ -146,6 +146,23 @@ Scan over channels (no retraining needed):
 python scan.py --scan-var channels --values 1,2,4,8 \
     --n-bins 16 --n-obs-scale 5.0 --repeats 3 --out-tag channels
 ```
+
+Scan over the *shared fraction* of nuisances at fixed total nuisance count
+`T = K + N*M`. K is the comma-separated list of values to visit; M is
+auto-computed at each point as `(T - K) / N`. Each chosen K must satisfy
+`(T - K) % N == 0`. The plot's x-axis is the fraction `K / T` ∈ [0, 1]:
+
+```bash
+python scan.py --scan-var shared_frac --values 0,4,8,12,16 \
+    --channels 8 --n-bins 16 --total-nuisances 16 \
+    --n-obs-scale 5.0 --repeats 3 --out-tag shared_frac
+```
+
+This is the regime that most clearly motivates AD: every shared-parameter
+perturbation invalidates the per-bin cache in *all* channels at once, while
+a per-channel perturbation only touches one channel's cache. So the
+CPU/Codegen ratio should grow with the shared fraction even though the
+total parameter count stays put.
 
 The other scan variables are `n_bins`, `n_per_channel`, and `n_obs_scale`.
 Pass `--skip-retrain` if you've already trained a surrogate that matches the
