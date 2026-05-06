@@ -29,9 +29,12 @@ HistFactory morph factor is
 
 The neural network is trained to regress `log r(b, theta)` as a function of
 (bin_pos, theta), and exported as a graph that emits `r = exp(log_r)` -- a
-strictly positive scalar suitable for use as a `ParamHistFunc` bin parameter
-in the ROOT-side benchmark. The corresponding RooHistFunc holds the nominal
-shape `y^nom(b) = B_b + S_b`, so the per-bin yield is reconstructed as
+strictly positive scalar. On the ROOT side a single `RooONNXFunc` per channel
+multiplies into the binned-likelihood `shape`, with the (rescaled) observable
+fed in as `bin_pos`; the binned-NLL evaluator already sweeps `x` over bin
+centres, so no per-bin replicas of the network are needed. The corresponding
+RooHistFunc holds the nominal shape `y^nom(b) = B_b + S_b`, so the per-bin
+yield is reconstructed as
 
     y(b, theta) = nominal(b) * r(b, theta).
 

@@ -7,11 +7,13 @@ Layout of one channel
 For each channel `c`, with `B` bins:
 
     nominal(b)   : RooHistFunc with the nominal per-bin yield y^nom_b.
-    morph(b)     : HistFactory `ParamHistFunc` whose `B` bin parameters are
-                   `B` distinct `RooONNXFunc` instances (all pointing at the
-                   *same* ONNX file but each fed a different bin position and
-                   the channel's per-channel nuisances). The NN output is the
-                   morph factor r(b, theta) >= 0.
+    morph(x)     : a single `RooONNXFunc` taking the (linearly rescaled)
+                   observable `x` together with the channel's per-channel
+                   nuisances. In binned-likelihood mode the NLL evaluates
+                   `shape` once per bin with `x` set to that bin's centre,
+                   so this single ONNX call produces the per-bin morph
+                   factor r(b, theta) >= 0 without an explicit
+                   `ParamHistFunc` indirection.
     binWidth(b)  : `RooBinWidthFunction` returning 1/binWidth at evaluation
                    time. In binned-likelihood mode it collapses to 1.0 and
                    triggers the `BinnedLikelihoodActiveYields` flag, so that
@@ -127,10 +129,21 @@ def build_model(meta, n_channels, n_bins, obs_scale, seed):
 
     rng = np.random.default_rng(seed)
 
-    # Observable with explicit binning -- ParamHistFunc reads its bin count
-    # from the observable's binning.
+    # Observable with explicit binning. The binned-likelihood evaluator
+    # samples `shape` once per bin with x set to that bin's centre, which
+    # is what the morph network's bin-position input expects (after a
+    # linear rescaling -- see `x_norm` below).
     x = ROOT.RooRealVar("x", "x", 0.0, x_min, x_max)
     x.setBins(n_bins)
+
+    # The trainer normalises bin centres via `x * 2/(x_max - x_min)` (see
+    # train_and_export.py:bin_positions_norm). Reproduce that transform on
+    # the observable so we can feed `x` directly to the ONNX network
+    # instead of carrying B per-bin position constants.
+    x_norm = ROOT.RooFormulaVar(
+        "x_norm", "x normalised to NN input range",
+        f"{2.0 / (x_max - x_min)} * @0", ROOT.RooArgList(x),
+    )
 
     # POI: shared across channels.
     mu = ROOT.RooRealVar("mu", "mu", 1.0, mu_min, mu_max)
@@ -150,13 +163,7 @@ def build_model(meta, n_channels, n_bins, obs_scale, seed):
         nuisances.append(nu_k)
         constraints.append(con_k)
 
-    # Per-bin position constants (shared across channels).
-    bin_pos = bin_positions_norm(meta, n_bins)
-    bin_pos_consts = []
-    for b in range(n_bins):
-        c_b = ROOT.RooConstVar(f"binpos_{b}", f"binpos_{b}", float(bin_pos[b]))
-        bin_pos_consts.append(c_b)
-    keep.extend(bin_pos_consts)
+    keep.append(x_norm)
 
     # Truth alphas: well separated across channels, deterministic given seed.
     if M > 0:
@@ -191,26 +198,17 @@ def build_model(meta, n_channels, n_bins, obs_scale, seed):
             constraints.append(con_cm)
         alphas_per_chan.append(alphas_c)
 
-        # theta arg list per bin: (mu, nu_1..nu_K, alpha_{c,1}..alpha_{c,M}).
+        # theta arg list: (mu, nu_1..nu_K, alpha_{c,1}..alpha_{c,M}).
         theta_args = [mu, *nuisances, *alphas_c]
 
-        # One RooONNXFunc per bin, all pointing at the same ONNX file.
-        morph_funcs = []
-        for b in range(n_bins):
-            f_b = ROOT.RooONNXFunc(
-                f"morph_c{c}_b{b}", "",
-                [[bin_pos_consts[b]], theta_args],
-                str(ONNX_PATH),
-            )
-            morph_funcs.append(f_b)
-
-        # ParamHistFunc with the morph functions as bin parameters.
-        # The class lives in the global namespace despite the
-        # `RooStats/HistFactory/ParamHistFunc.h` header path.
-        morph_phf = ROOT.ParamHistFunc(
-            f"morph_phf_c{c}", "",
-            ROOT.RooArgList(x),
-            ROOT.RooArgList(*morph_funcs),
+        # Single RooONNXFunc per channel: bin-position input is the
+        # observable itself (rescaled), so ParamHistFunc + B per-bin copies
+        # of the network are unnecessary -- the binned-likelihood evaluator
+        # already calls this once per bin with x at the bin centre.
+        morph_func = ROOT.RooONNXFunc(
+            f"morph_c{c}", "",
+            [[x_norm], theta_args],
+            str(ONNX_PATH),
         )
 
         # Nominal RooHistFunc for the channel.
@@ -234,7 +232,7 @@ def build_model(meta, n_channels, n_bins, obs_scale, seed):
         # yield-per-bin in binned-likelihood mode).
         shape = ROOT.RooProduct(
             f"shape_c{c}", "",
-            ROOT.RooArgList(nom_hf, morph_phf, binw),
+            ROOT.RooArgList(nom_hf, morph_func, binw),
         )
 
         # Per-channel extended PDF as a RooRealSumPdf with a single component.
@@ -261,7 +259,7 @@ def build_model(meta, n_channels, n_bins, obs_scale, seed):
         pdfs_map[chan_name] = pdf_c
         data_hists[chan_name] = obs_hist
         keep.extend([
-            *morph_funcs, morph_phf, nom_hist, nom_dh, nom_hf,
+            morph_func, nom_hist, nom_dh, nom_hf,
             binw, shape, pdf_c, obs_hist, *alphas_c,
         ])
 

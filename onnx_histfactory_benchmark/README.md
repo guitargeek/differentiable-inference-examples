@@ -3,8 +3,9 @@
 A binned, multi-channel HistFactory-style benchmark that mirrors
 `onnx_sbi_benchmark/` but for the **interpolation/morphing** step typical of
 HistFactory templates. The morphing function is replaced by a single
-neural-network surrogate, instantiated once per (channel, bin) as a
-`RooONNXFunc`. Two NLL builds are compared:
+neural-network surrogate, instantiated once per channel as a `RooONNXFunc`
+that takes the (rescaled) observable directly as its bin-position input.
+Two NLL builds are compared:
 
 1. **CPU backend** (default `createNLL(data)`): standard RooFit graph, Minuit2
    gets gradients by finite differences; the binned-likelihood optimisation
@@ -44,17 +45,20 @@ with all nuisances at zero and `mu = mu_true` (`MU_TRUE` in
 
 ## Likelihood
 
-Per channel, the standard HistFactory pattern:
+Per channel:
 
 ```
-shape_c = nominal_HistFunc(y^nom)  *  ParamHistFunc(morph)  *  RooBinWidthFunction
+shape_c = nominal_HistFunc(y^nom)  *  RooONNXFunc(x_norm, theta_c)  *  RooBinWidthFunction
 pdf_c   = RooRealSumPdf(shape_c, const_one, extended=True)
 pdf_c.setAttribute("BinnedLikelihood")
 ```
 
-* The `ParamHistFunc` bin parameters are `N_bins` distinct `RooONNXFunc`
-  instances pointing at the same ONNX file but fed different `bin_pos`
-  constants and channel-specific `alpha` arguments.
+* A single `RooONNXFunc` per channel takes the observable itself (rescaled
+  via a `RooFormulaVar` to the network's `[-1, 1]` input range) as the
+  bin-position input. In binned-likelihood mode the NLL evaluates `shape`
+  once per bin with `x` set to that bin's centre, so this single ONNX call
+  produces the per-bin morph factor without an explicit `ParamHistFunc`
+  indirection or `N_bins` constant copies of the network.
 * `RooBinWidthFunction` divides by the bin width during plain evaluation so
   the product behaves as a density. In binned-likelihood mode it collapses to
   `1.0` and triggers `BinnedLikelihoodActiveYields`, telling the codegen NLL
@@ -155,6 +159,6 @@ scan points and want to reuse it.
 * The first `minimize()` call after `createNLL(..., Codegen())` pays a one-off
   Clad gradient-generation cost; the benchmark always runs a warm-up call
   before the timed repeats.
-* Each `RooONNXFunc` instance creates its own SOFIE session. With
-  `N_channels * N_bins` instances the construction step takes a few seconds
-  and grows linearly with the product.
+* Each `RooONNXFunc` instance creates its own SOFIE session. With one
+  instance per channel the construction step grows linearly in `N_channels`
+  (independent of `N_bins`).
